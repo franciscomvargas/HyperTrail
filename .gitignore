@@ -1,0 +1,66 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+.venv/
+ENV/
+env/
+.env
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+hypertrail_debug.log
+
+# Secrets and Credentials
+.env
+.env.local
+.config/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Database (keep the file but ignore if creating new ones)
+logs/hypertrail_bots.db
+
+# Backup files
+*.backup
+*.bak
+*~
+
+# Temporary files
+*.tmp
+temp/

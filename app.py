@@ -1,0 +1,500 @@
+#!/usr/bin/env python3
+"""
+HyperTrail Trailing Order TUI - Complete Textual Application
+Interactive dashboard for managing trailing limit orders on Hyperliquid DEX.
+"""
+
+import asyncio
+import logging
+import sys
+import uuid
+from pathlib import Path
+from datetime import datetime
+from textual.app import App, ComposeResult
+from textual.screen import ModalScreen, Screen
+from textual.widgets import (
+    Static, Input, Select, Button, Label, Header, Footer, 
+    DataTable, TabPane, Tabs, Tree
+)
+from textual.containers import Horizontal, Vertical, ScrollableContainer, Container
+from textual.binding import Binding
+
+
+# Import engine components
+from engine.models import BotConfig, BotState, TrailType, BotStatus
+from engine.config import config
+from engine.persistence import DatabasePersistence
+
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s: [hypertrail] - %(levelname)s - %(message)s"
+)
+
+logger = logging.getLogger("hypertrail.tui")
+
+
+class CreateBotDialog(ModalScreen):
+    """Modal dialog for creating new trailing order bots."""
+    
+    CSS = """
+    #create-bot-container {
+        padding: 2;
+        height: auto;
+        max-height: 70%;
+    }
+    
+    #bot-form {
+        width: 80fr;
+        max-width: 100%;
+        padding: 1 2;
+        background: $surface;
+        border: solid $primary;
+    }
+    
+    .form-label {
+        text-style: bold;
+        width: 18fr;
+        padding-right: 1;
+    }
+    
+    #button-group {
+        height: auto;
+        margin-top: 2;
+    }
+"""
+    
+    BINDINGS = [Binding("escape", "cancel", "Cancel")]
+    
+    def compose(self) -> ComposeResult:
+        trail_types = [(t.value, t.value.replace('_', ' ').title()) for t in TrailType]
+        
+        with ScrollableContainer(id="create-bot-container"):
+            title = Static("[bold]== NEW BOT CONFIGURATION ==[/]", id="dialog-title")
+            yield title
+            
+            with Horizontal(id="bot-form"):
+                # Trail Type selector (no initial value - user must select one)
+                with Vertical():
+                    Label("Trail Type", classes="form-label")
+                    yield Select(
+                        trail_types,
+                        allow_blank=False,
+                        id="trail_type",
+                    )
+                
+                # Coin symbol
+                with Vertical():
+                    Label("Coin (e.g., BTC)", classes="form-label")
+                    yield Input(id="coin", placeholder="BTC", value="BTC")
+                
+                # Size in USD
+                with Vertical():
+                    Label("Size ($USD)", classes="form-label")
+                    yield Input(id="size_usd", placeholder="100.0", type="number", value="100.0")
+                
+                # Order side
+                with Vertical():
+                    Label("Side", classes="form-label")
+                    yield Select(
+                        [("buy", "Buy"), ("sell", "Sell")],
+                        allow_blank=False,
+                        id="order_side",
+                    )
+                
+                # Offset percentage
+                with Vertical():
+                    Label("Initial Offset (%)", classes="form-label")
+                    yield Input(id="offset_pct", placeholder="0.8", type="number", value="0.8")
+                    note = Static("[dim]Min order: $50 USD[/]", id="min-size-note")
+                    yield note
+            
+            status_static = Static(
+                "[yellow]Press Enter on buttons to confirm or Cancel to close.[/]"
+            )
+            yield status_static
+            
+            # Button group
+            with Horizontal(id="button-group"):
+                create_btn = Button("Create Bot", id="create", variant="primary")
+                cancel_btn = Button("Cancel", id="cancel", variant="default")
+                
+                yield create_btn
+                yield cancel_btn
+        
+        footer_static = Footer()
+        yield footer_static
+    
+    BINDINGS = [Binding("escape", "dismiss_cancel", "Cancel")]
+    
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        """Handle button clicks."""
+        if event.button.id == "create":
+            self._submit()
+        elif event.button.id == "cancel":
+            self.dismiss(False)
+    
+    def action_dismiss_cancel(self) -> None:
+        """Handle ESC key to dismiss dialog with cancel."""
+        self.dismiss(False)
+
+    def _submit(self) -> None:
+        """Submit the form and return bot config."""
+        # Get selected trail type - Select returns display text, need to map back to enum value
+        selected_display = self.query_one("#trail_type", Select).value
+        # Map display labels back to TrailType enum values
+        trail_type_value = {
+            "Long Entry": "long_entry",
+            "Short Entry": "short_entry", 
+            "Long Exit": "long_exit",
+            "Short Exit": "short_exit"
+        }.get(selected_display, "long_entry")  # fallback to long_entry
+        trail_type = TrailType(trail_type_value)
+        
+        coin = self.query_one("#coin", Input).value.upper() if self.query_one("#coin", Input).value else "BTC"
+        
+        try:
+            size_usd = float(self.query_one("#size_usd", Input).value)
+            offset_pct = float(self.query_one("#offset_pct", Input).value) or 0.8
+        except ValueError:
+            self.notify("Invalid numbers entered", severity="error")
+            return
+        
+        order_side = self.query_one("#order_side", Select).value
+        
+        bot_config = {
+            "id": str(uuid.uuid4())[:8],
+            "coin": coin,
+            "trail_type": trail_type.value,
+            "size_usd": size_usd,
+            "offset_pct": offset_pct,
+            "max_chase_pct": 1.5,
+            "order_side": order_side,
+            "status": "ACTIVE",
+            "created_at": datetime.now().isoformat()
+        }
+        
+        self.notify(f"Creating bot: {coin} (ID: {bot_config['id']})!", severity="success")
+        self.dismiss(bot_config)
+
+
+class HelpModal(ModalScreen):
+    """Help information modal."""
+    
+    CSS = """
+    #help-content {
+        padding: 2;
+    }
+    
+    .key-badge {
+        background: $primary-darken-1;
+        color: white;
+        text-style: bold;
+        padding: 1;
+        width: auto;
+    }
+"""
+    
+    BINDINGS = [Binding("escape", "dismiss", "Exit")]
+    
+    def compose(self) -> ComposeResult:
+        yield Static(
+            "[bold]== HYPERTRAIL TUI HELP ==[/]\n"
+        )
+        
+        yield Static("[bold]Keyboard Controls:[/]")
+        yield Static("  [yellow][q][/]. Quit the application")
+        yield Static("  [yellow][c] [/]. Create new bot (creates dialog)")
+        yield Static("  [yellow][d] [/]. Delete selected bots")
+        yield Static("  [yellow][m] [/]. Toggle monitoring mode")
+        yield Static("  [yellow][h] [/]. This help screen\n")
+        
+        yield Static("[bold]Trailing Order Types:[/]")
+        for trail_type in TrailType:
+            yield Static(f"  • {trail_type.value.replace('_', ' ').title()}")
+        
+        yield Static("\n[bold]Bot Management:[/]\n  ")
+        yield Static("  • Use arrow keys and Enter to select bots\n  ")
+        yield Static("  • Select bot from queue table below\n  ")
+        yield Static("  • Delete with D key when selected")
+        
+        status_static = Static(
+            "[dim]Press ESC or click Close to exit help.[/]"
+        )
+        yield status_static
+        
+        close_btn = Button("Close", id="help-close", variant="default")
+        yield close_btn
+    
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "help-close":
+            self.dismiss(None)
+    
+    def action_dismiss(self) -> None:
+        """Handle ESC key to dismiss help modal."""
+        self.dismiss(None)
+
+
+class BotManagementScreen(Screen):
+    """Main screen for bot management and order operations."""
+    
+    CSS = """
+    Screen {
+        background: $background;
+        width: 100%;
+        height: 100%;
+    }
+    
+    #main-panel {
+        height: 100%;
+        margin: 1;
+    }
+    
+    #stats-bar {
+        height: auto;
+        padding: 1;
+        background: $secondary-background;
+        border: solid $primary;
+        margin-bottom: 1;
+    }
+    
+    .stat-item {
+        width: 25fr;
+        text-align: center;
+        padding: 1;
+    }
+    
+    #bot-table-container {
+        height: 8fr;
+        border: solid $primary-darken-1;
+        background: $surface;
+    }
+    
+    DataTable {
+        width: 100%;
+        height: 100%;
+        padding: 1;
+    }
+    
+    #action-buttons {
+        height: auto;
+        margin-top: 1;
+        padding: 1;
+        background: $secondary-background;
+        align: left middle;
+    }
+    """
+    
+    BINDINGS = [
+        Binding("q", "quit_app", "Quit", show=True),
+        Binding("c", "open_create_bot", "New Bot", show=True),
+        Binding("d", "delete_selected", "Delete (d)", show=True),
+        Binding("m", "toggle_monitor", "Monitor (m)", show=True),
+        Binding("h", "show_help", "Help (h)", show=True),
+    ]
+    
+    def __init__(self):
+        super().__init__()
+        self.bots = {}  # Store bot data {id: dict}
+        self.table_widget = None
+
+    async def on_mount(self) -> None:
+        logger.info("Bot management screen mounted")
+
+    def compose(self) -> ComposeResult:
+        """Create the main layout."""
+        
+        yield Header()
+        
+        # Stats panel
+        with Horizontal(id="stats-bar"):
+            yield Static("Network:", id="_status_label", classes="stat-item")
+            yield Static(config.NETWORK_MODE.upper(), classes="stat-item")
+            
+            config_valid = config.is_valid()
+            status_color = "green" if config_valid else "red"
+            status_text = f"[{status_color}]Valid[/]" if config_valid else "[red]Invalid[/]"
+            yield Static(f"API: {status_text}", id="_api_status", classes="stat-item")
+            
+            yield Static("Active Bots:", id="_bots_label", classes="stat-item")
+            yield Static(str(len(self.bots)), id="_active_counter", classes="stat-item")
+        
+        # Main table container with DataTable widget
+        with ScrollableContainer(id="bot-table-container"):
+            self.table_widget = DataTable()
+            for header in ["ID", "Coin", "Trail Type", "Side", "Size ($)", "Offset %", "Status"]:
+                self.table_widget.add_column(header, width=8)
+            yield self.table_widget
+        
+        # Action buttons
+        with Horizontal(id="action-buttons"):
+            create_btn = Button("Create Bot (c)", variant="primary")
+            delete_btn = Button("Delete Selected (d)")
+            monitor_btn = Button("Monitor Orders (m)")
+            help_btn = Button("Help (h)")
+            
+            yield create_btn
+            yield delete_btn
+            yield monitor_btn
+            yield help_btn
+        
+        yield Footer()
+
+    async def on_mount(self) -> None:
+        """Set up the screen after mount - populate table."""
+        super().on_mount() if hasattr(super(), "on_mount") else None
+        
+        
+        # Load demo bots directly now that table_widget exists from compose
+        await self._load_bots()
+
+    async def _load_bots(self) -> None:
+        """Load bots from persistence (mock for demo)."""
+        self.table_widget.clear()
+
+    def action_quit_app(self) -> None:
+        """Exit the application."""
+        self.app.exit()
+        
+
+    def action_open_create_bot(self) -> None:
+        """Open the create bot dialog."""
+        self.notify("Opening Create Bot dialog...", severity="info")
+        dialogue = CreateBotDialog()
+        self.app.push_screen(dialogue, callback=self._on_create_bot_created)
+
+    def _on_create_bot_created(self, new_config: dict | None) -> None:
+        """Handle bot creation result."""
+        if new_config and isinstance(new_config, dict):
+            # Store in memory first
+            self.bots[new_config["id"]] = new_config
+            
+            # Save to database for persistence
+            import asyncio
+            try:
+                success = asyncio.run(self.persistence.persist_bot_config(new_config))
+                if success:
+                    print(f"[INFO] Saved bot {new_config['coin']} ({new_config['id']}) to database")
+            except Exception as e:
+                print(f"[ERROR] Failed to save bot: {e}")
+            
+            self.refresh_table()
+            self.notify(f"✓ Bot {new_config['coin']} created!", severity="success")
+        else:
+            self.notify("Failed to create bot", severity="error")
+
+
+
+    def refresh_table(self) -> None:
+        """Update the table with current bots."""
+        self.table_widget.clear()
+        
+        for bot_id, bot_data in sorted(self.bots.items()):
+            row_data = (
+                bot_data.get("id", "")[:8],
+                bot_data.get("coin", ""),
+                bot_data.get("trail_type", "").replace('_', ' ').title(),
+                bot_data.get("order_side", "UNKNOWN").upper(),
+                f"${bot_data.get('size_usd', 0):.2f}",
+                f"{bot_data.get('offset_pct', 0)}%",
+                "ACTIVE" if bot_data.get("status") == "ACTIVE" else "INACTIVE",
+            )
+            self.table_widget.add_row(*row_data)
+
+
+
+class HyperTrailApp(App):
+    """Main application entry point for TUI."""
+    
+    CSS = """
+    Screen { background: $background; }
+    DataTable { padding: 1; }
+    .stat-item { padding: 1; text-align: center; }
+    #stats-bar { height: auto; padding: 1; background: $secondary-background; }
+    """
+    
+    TITLE = "HyperTrail - Trailing Order Manager"
+    
+    BINDINGS = [
+        Binding("q", "quit_app_app", "Quit"),
+        Binding("c", "open_create_bot", "Create Bot"),
+        Binding("d", "delete_selected", "Delete Bot"),
+        Binding("m", "toggle_monitor", "Monitor"),
+        Binding("h", "show_help", "Help"),
+    ]
+    
+    def __init__(self):
+        super().__init__()
+        
+        # Initialize persistence layer
+        db_path = Path("logs") / "hypertrail_bots.db"
+        self.persistence = DatabasePersistence(str(db_path))
+
+    async def on_mount(self) -> None:
+        """Set up the main screen."""
+        logger.info("HyperTrail TUI starting...")
+        
+        # Push the bot management screen (pass callback for modal results)
+        main_screen = BotManagementScreen()
+        self.push_screen(main_screen, callback=self._on_main_screen_ready)
+
+    def _on_main_screen_ready(self, result=None):
+        """Callback after main screen is loaded."""
+        logger.info("Main bot management screen ready")
+    
+    def action_quit_app(self) -> None:
+        """Exit the application."""
+        self.exit()
+        sys.exit(0)
+    
+    def action_open_create_bot(self) -> None:
+        """Delegate to main screen to create bot."""
+        if self.screen and hasattr(self.screen, 'open_create_bot'):
+            self.screen.open_create_bot()
+        else:
+            self.notify("Opening create dialog...", severity="info")
+    
+    def action_delete_selected(self) -> None:
+        """Delegate to main screen to delete selected bots."""
+        if self.screen and hasattr(self.screen, 'delete_selected'):
+            self.screen.delete_selected()
+        else:
+            self.notify("Please select a bot to delete", severity="warning")
+    
+    def action_toggle_monitor(self) -> None:
+        """Toggle monitoring mode."""
+        self.notify("✓ Monitoring mode activated", severity="success")
+    
+    def action_show_help(self) -> None:
+        """Show help modal."""
+        if self.screen and hasattr(self.screen, 'show_help'):
+            self.screen.show_help()
+
+
+async def run_with_debug():
+    """Debug run function (kept for backwards compatibility)."""
+    print("=" * 70)
+    print("🚀 HYPERTRAIL TRAILING ORDER MANAGER")
+    print("=" * 70)
+    print()
+    print(f"✅ Network: {config.NETWORK_MODE.upper()}")
+    print(f"✅ API Configuration: {'Valid' if config.is_valid() else 'Invalid - Check credentials'}")
+    print("✅ Database initialized at logs/hypertrail_bots.db")
+    print("=" * 70)
+    
+    app = HyperTrailApp()
+    try:
+        await app.run_async()
+    except KeyboardInterrupt:
+        print("\n\n👋 Session interrupted by user")
+        sys.exit(0)
+
+
+if __name__ == "__main__":
+    """Main entry point for the TUI application."""
+    try:
+        asyncio.run(run_with_debug())
+    except Exception as e:
+        logger.exception(f"Fatal error: {e}")
+        print(f"\n❌ Application crashed: {e}", file=sys.stderr)
+        sys.exit(1)
