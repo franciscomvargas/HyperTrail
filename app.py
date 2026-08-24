@@ -286,7 +286,8 @@ class BotManagementScreen(Screen):
     """
     
     BINDINGS = [
-        Binding("q", "quit_app", "Quit", show=True),
+        Binding("d", "action_delete_selected", "Delete (d)", show=True),  # Must match method name
+        Binding("q",  "quit_app", "Quit", show=True),
         Binding("c", "open_create_bot", "New Bot", show=True),
         Binding("d", "delete_selected", "Delete (d)", show=True),
         Binding("m", "toggle_monitor", "Monitor (m)", show=True),
@@ -444,8 +445,8 @@ class BotManagementScreen(Screen):
             dialogue = CreateBotDialog()
             self.app.push_screen(dialogue, handle_result)
     
-    def delete_selected(self) -> None:
-        """Delete selected bot(s) from table."""
+    async def _execute_delete_selection(self) -> None:
+        """Internal: Execute deletion selection (async)."""
         # Check if table exists and has bots
         if not self.table_widget or len(self.bots) == 0:
             logger.error("[DELETE] Table widget unavailable or no bots")
@@ -470,7 +471,7 @@ class BotManagementScreen(Screen):
                     for row_idx in sorted(sel_value):
                         if 0 <= row_idx < len(self.bots):
                             bot_id = list(self.bots.keys())[row_idx]
-                            self._delete_bot(bot_id)
+                            asyncio.create_task(self._handle_single_deletion(bot_id))
                             logger.info(f"[DELETE] ✓ Deleted {bot_id} from selected row {row_idx}")
                     return
 
@@ -481,7 +482,7 @@ class BotManagementScreen(Screen):
                 
                 if 0 <= cursor < len(self.bots):
                     bot_id = list(self.bots.keys())[cursor]
-                    self._delete_bot(bot_id)
+                    asyncio.create_task(self._handle_single_deletion(bot_id))
                     logger.info(f"[DELETE] ✓ Deleted {bot_id} from cursor row {cursor}")
                     return
             
@@ -492,7 +493,7 @@ class BotManagementScreen(Screen):
                 
                 if isinstance(first, int) and 0 <= first < len(self.bots):
                     bot_id = list(self.bots.keys())[first]
-                    self._delete_bot(bot_id)
+                    asyncio.create_task(self._handle_single_deletion(bot_id))
                     logger.info(f"[DISPLAY] ✓ Deleted {bot_id} from first_selected")
                     return
 
@@ -506,90 +507,39 @@ class BotManagementScreen(Screen):
             traceback.print_exc()
             self.notify(f"Error: {str(e)}", severity="error")
 
-    def _delete_bot(self, bot_id: str) -> None:
-        """Delete a single bot."""
+
+    async def _handle_single_deletion(self, bot_id: str) -> None:
+        """Handle deletion of a single bot asynchronously with UI updates."""
         try:
             # Delete from database
             if self.persistence:
-                asyncio.run(self.persistence.delete_bot(bot_id))
+                await self.persistence.delete_bot(bot_id)
+                logger.info(f"[DELETE] ✓ Removed {bot_id} from database")
             
-            # Remove from memory
+            # Remove from memory and update UI
             if bot_id in self.bots:
                 del self.bots[bot_id]
-                logger.info(f"[DELETE] Deleted bot {bot_id}")
+                logger.info(f"[DELETE] ✓ Deleted bot {bot_id}")
                 
-                # Refresh table immediately
+                # Refresh table to remove deleted row
                 self.refresh_table()
                 
-                # Update counter
+                # Update active bots counter
                 try:
                     if active_static := self.query_one("#_active_counter", Static):
                         active_static.update(str(len(self.bots)))
-                        logger.info(f"[DELETE] Updated counter to {len(self.bots)}")
+                        logger.info(f"[DELETE] ✓ Counter updated to {len(self.bots)}")
                 except Exception as e:
                     logger.warning(f"[DELETE] Could not update counter: {e}")
             
+            # Show confirmation
             self.notify(f"✓ Bot {bot_id} deleted", severity="success")
         except Exception as e:
-            logger.error(f"[DELETE] Failed to delete bot {bot_id}: {e}")
-            self.notify(f"Failed to delete bot: {str(e)}", severity="error")
+            logger.error(f"[DELETE] Error deleting {bot_id}: {e}")
+            import traceback
+            traceback.print_exc()
+            self.notify(f"Error deleting bot: {str(e)}", severity="error")
 
-    async def _on_create_bot_created(self, new_config: dict) -> None:
-        """Handle bot creation result."""
-        logger.info(f"[CREATE] Processing bot config: {new_config.get('coin', 'Unknown')}")
-        
-        if not isinstance(new_config, dict):
-            logger.error(f"[CREATE] Invalid config type: {type(new_config).__name__}")
-            self.notify("Invalid configuration format", severity="error")
-            return
-            
-        try:
-            # Build complete bot configuration
-            full_config = {
-                "id": str(new_config.get("id", uuid.uuid4().hex[:8])),
-                "bot_id": str(new_config.get("id", "")),
-                "coin": str(str(new_config.get("coin", "BTC")).upper()),
-                "trail_type": self._map_trail_type(new_config.get("trail_type")),
-                "size_usd": float(new_config.get("size_usd", 100.0)),
-                "offset_pct": float(new_config.get("offset_pct", 0.8)),
-                "max_chase_pct": float(new_config.get("max_chase_pct", 1.5)),
-                "order_side": str(new_config.get("order_side", "buy")).lower(),
-                "status": "ACTIVE",
-                "is_active": True,
-            }
-            
-            # Store in memory FIRST
-            bot_id = full_config["id"]
-            self.bots[bot_id] = full_config
-            logger.info(f"[CREATE] Added bot {full_config['coin']} to memory: {len(self.bots)} total bots")
-            
-            # Save to database for persistence (async)
-            if hasattr(self, 'persistence') and self.persistence:
-                try:
-                    # Map order_side to reduce_only (1=buy, 0=sell)
-                    order_side = full_config["order_side"]
-                    reduce_only = 1 if order_side == "buy" else 0
-                    
-                    save_success = await self.persistence.persist_bot_config(
-                        full_config, 
-                        reduce_only=reduce_only
-                    )
-                    
-                    if save_success:
-                        logger.info(f"[CREATE] Bot saved to database: {full_config['coin']}")
-                    else:
-                        logger.warning(f"[CREATE] Failed to save bot to database")
-                except Exception as e:
-                    logger.error(f"[CREATE] Database error: {e}")
-            
-            # CRITICAL: Update UI immediately after adding to memory
-            self._refresh_ui_after_create(full_config)
-
-        except Exception as e:
-            logger.exception(f"[CREATE] Error processing bot: {e}")
-            self.notify(f"Error creating bot: {str(e)}", severity="error")
-    
-    def _refresh_ui_after_create(self, new_bot: dict) -> None:
         """Refresh UI after bot creation - called synchronously."""
         logger.info(f"[UI] Refreshing table and counter for new bot")
         
@@ -654,7 +604,8 @@ class HyperTrailApp(App):
     TITLE = "HyperTrail - Trailing Order Manager"
     
     BINDINGS = [
-        Binding("q", "quit_app_app", "Quit"),
+        Binding("d", "action_delete_selected", "Delete (d)", show=True),  # Must match method name
+        Binding("q",  "quit_app_app", "Quit"),
         Binding("c", "open_create_bot", "Create Bot"),
         Binding("d", "delete_selected", "Delete Bot"),
         Binding("m", "toggle_monitor", "Monitor"),
