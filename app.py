@@ -491,15 +491,20 @@ class BotManagementScreen(Screen):
             self.notify("Table not ready", severity="error")
             return
         
-        # DataTable.highlighted returns (row_index, column_index) for selected cell
-        highlighted = self.table_widget.highlighted
+        # DataTable.cursor_row gives the current row position when using arrow keys or clicking
+        cursor_row = self.table_widget.cursor_row if hasattr(self.table_widget, 'cursor_row') else None
         
-        if highlighted is None or not isinstance(highlighted, tuple):
-            logger.warning("[DELETE] No cell currently highlighted in table")
+        if cursor_row is None:
+            logger.warning("[DELETE] No row currently selected/cursor at root level")
             self.notify("Please select a row in the table first", severity="warning")
             return
         
-        row_idx = highlighted[0]  # Get the row index from (row, column) tuple
+        if not (0 <= cursor_row < len(self.bots)):
+            logger.error(f"[DELETE] Invalid cursor_row {cursor_row} for table with {len(self.bots)} rows")
+            self.notify("Invalid selection position", severity="warning")
+            return
+        
+        row_idx = cursor_row  # Use the cursor row directly
         
         if not (0 <= row_idx < len(self.bots)):
             logger.error(f"[DELETE] Row index {row_idx} is out of range ({len(self.bots)} bots)")
