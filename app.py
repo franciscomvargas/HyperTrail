@@ -445,120 +445,6 @@ class BotManagementScreen(Screen):
             dialogue = CreateBotDialog()
             self.app.push_screen(dialogue, handle_result)
     
-    async def _execute_delete_selection(self) -> None:
-        """Internal: Execute deletion selection (async)."""
-        # Check if table exists and has bots
-        if not self.table_widget or len(self.bots) == 0:
-            logger.error("[DELETE] Table widget unavailable or no bots")
-            self.notify("No bots to delete", severity="warning")
-            return
-
-        try:
-            # Try multiple approaches to get selection
-            logger.info(f"[DELETE] Checking selection in DataTable with {len(self.bots)} bots shown in table")
-            
-            # Get available attributes related to selection
-            sel_attrs = [a for a in dir(self.table_widget) if 'select' in a.lower() or 'cursor' in a.lower()]
-            logger.info(f"[DELETE] Relevant attrs: {sel_attrs}")
-
-            # Approach 1: Check selection (set-based, multi-select mode)
-            if hasattr(self.table_widget, 'selection'):
-                sel_value = self.table_widget.selection
-                logger.info(f"[DELETE] Selection value: {type(sel_value).__name__} = {sel_value}")
-                
-                if isinstance(sel_value, set) and len(sel_value):
-                    # Multi-select mode with actual selections
-                    for row_idx in sorted(sel_value):
-                        if 0 <= row_idx < len(self.bots):
-                            bot_id = list(self.bots.keys())[row_idx]
-                            asyncio.create_task(self._handle_single_deletion(bot_id))
-                            logger.info(f"[DELETE] ✓ Deleted {bot_id} from selected row {row_idx}")
-                    return
-
-            # Approach 2: Check cursor position (arrow keys mode)
-            if hasattr(self.table_widget, 'cursor_row') and self.table_widget.cursor_row is not None:
-                cursor = self.table_widget.cursor_row
-                logger.info(f"[DELETE] Cursor at row {cursor}, total rows {len(self.bots)}")
-                
-                if 0 <= cursor < len(self.bots):
-                    bot_id = list(self.bots.keys())[cursor]
-                    asyncio.create_task(self._handle_single_deletion(bot_id))
-                    logger.info(f"[DELETE] ✓ Deleted {bot_id} from cursor row {cursor}")
-                    return
-            
-            # Approach 3: First selection (if exists)
-            if hasattr(self.table_widget, 'first_selected') and self.table_widget.first_selected is not None:
-                first = self.table_widget.first_selected
-                logger.info(f"[DELETE] First selected index: {first}")
-                
-                if isinstance(first, int) and 0 <= first < len(self.bots):
-                    bot_id = list(self.bots.keys())[first]
-                    asyncio.create_task(self._handle_single_deletion(bot_id))
-                    logger.info(f"[DISPLAY] ✓ Deleted {bot_id} from first_selected")
-                    return
-
-            # No valid selection found
-            logger.error("[DELETE] No valid row selected - please select with arrow keys or click")
-            self.notify("Select a bot row (arrow keys or click to highlight), then press D", severity="warning")
-
-        except Exception as e:
-            logger.exception(f"[DELETE] Error checking selection: {e}")
-            import traceback
-            traceback.print_exc()
-            self.notify(f"Error: {str(e)}", severity="error")
-
-
-    async def _handle_single_deletion(self, bot_id: str) -> None:
-        """Handle deletion of a single bot asynchronously with UI updates."""
-        try:
-            # Delete from database
-            if self.persistence:
-                await self.persistence.delete_bot(bot_id)
-                logger.info(f"[DELETE] ✓ Removed {bot_id} from database")
-            
-            # Remove from memory and update UI
-            if bot_id in self.bots:
-                del self.bots[bot_id]
-                logger.info(f"[DELETE] ✓ Deleted bot {bot_id}")
-                
-                # Refresh table to remove deleted row
-                self.refresh_table()
-                
-                # Update active bots counter
-                try:
-                    if active_static := self.query_one("#_active_counter", Static):
-                        active_static.update(str(len(self.bots)))
-                        logger.info(f"[DELETE] ✓ Counter updated to {len(self.bots)}")
-                except Exception as e:
-                    logger.warning(f"[DELETE] Could not update counter: {e}")
-            
-            # Show confirmation
-            self.notify(f"✓ Bot {bot_id} deleted", severity="success")
-        except Exception as e:
-            logger.error(f"[DELETE] Error deleting {bot_id}: {e}")
-            import traceback
-            traceback.print_exc()
-            self.notify(f"Error deleting bot: {str(e)}", severity="error")
-
-        """Refresh UI after bot creation - called synchronously."""
-        logger.info(f"[UI] Refreshing table and counter for new bot")
-        
-        # Always refresh table (no guard clauses!)
-        if self.table_widget:
-            self.refresh_table()
-            logger.info(f"[UI] Table refreshed with {len(self.bots)} bots")
-            
-            # Update counter
-            try:
-                if active_static := self.query_one("#_active_counter", Static):
-                    active_static.update(str(len(self.bots)))
-                    logger.info(f"[UI] Counter updated to {len(self.bots)}")
-            except Exception as e:
-                logger.warning(f"[UI] Could not update counter: {e}")
-        else:
-            logger.error("[UI] Table widget is None - cannot refresh!")
-
-    def _map_trail_type(self, trail_type) -> str:
         """Map trail type to proper value."""
         if isinstance(trail_type, str):
             return trail_type.lower()
@@ -591,6 +477,59 @@ class BotManagementScreen(Screen):
         logger.info(f"[TABLE] Added {len(self.bots)} rows to table")
 
 
+
+    def action_delete_selected(self) -> None:
+        """Delete the bot at the currently highlighted row using Textual DataTable.highlighted."""
+        
+        if len(self.bots) == 0:
+            logger.info("[DELETE] No bots to delete")
+            self.notify("No bots to delete", severity="warning")
+            return
+        
+        if not self.table_widget:
+            logger.error("[DELETE] Table widget not available")
+            self.notify("Table not ready", severity="error")
+            return
+        
+        # DataTable.highlighted returns (row_index, column_index) for selected cell
+        highlighted = self.table_widget.highlighted
+        
+        if highlighted is None or not isinstance(highlighted, tuple):
+            logger.warning("[DELETE] No cell currently highlighted in table")
+            self.notify("Please select a row in the table first", severity="warning")
+            return
+        
+        row_idx = highlighted[0]  # Get the row index from (row, column) tuple
+        
+        if not (0 <= row_idx < len(self.bots)):
+            logger.error(f"[DELETE] Row index {row_idx} is out of range ({len(self.bots)} bots)")
+            self.notify("Invalid highlight position", severity="warning")
+            return
+        
+        # Get bot ID at this row position
+        bot_id = list(self.bots.keys())[row_idx]
+        logger.info(f"[DELETE] Deleting {bot_id} from highlighted row {row_idx}")
+        
+        # Remove from memory immediately for instant UI feedback
+        del self.bots[bot_id]
+        
+        # Refresh the table to update display
+        self.refresh_table()
+        
+        # Update counter
+        try:
+            if active_static := self.query_one("#_active_counter", Static):
+                active_static.update(str(len(self.bots)))
+        except Exception as e:
+            logger.warning(f"[DELETE] Could not update counter: {e}")
+        
+        # Schedule database deletion asynchronously (non-blocking)
+        if self.persistence:
+            import asyncio
+            asyncio.create_task(self.persistence.delete_bot(bot_id))
+        
+        self.notify(f"✓ Bot {bot_id} deleted", severity="success")
+
 class HyperTrailApp(App):
     """Main application entry point for TUI."""
     
@@ -604,11 +543,9 @@ class HyperTrailApp(App):
     TITLE = "HyperTrail - Trailing Order Manager"
     
     BINDINGS = [
-        Binding("d", "action_delete_selected", "Delete (d)", show=True),  # Must match method name
-        Binding("q",  "quit_app_app", "Quit"),
-        Binding("c", "open_create_bot", "Create Bot"),
-        Binding("d", "delete_selected", "Delete Bot"),
-        Binding("m", "toggle_monitor", "Monitor"),
+        Binding("d", "action_delete_selected", "Delete"),
+        Binding("q", "quit_app", "Quit"),
+        Binding("c", "open_create_bot", "New Bot"),
         Binding("h", "show_help", "Help"),
     ]
     
