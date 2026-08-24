@@ -454,7 +454,7 @@ class BotManagementScreen(Screen):
 
         try:
             # Try multiple approaches to get selection
-            logger.info(f"[DELETE] Checking selection - table has {len(self.table_widget).rows()} rows")
+            logger.info(f"[DELETE] Checking selection in DataTable with {len(self.bots)} bots shown in table")
             
             # Get available attributes related to selection
             sel_attrs = [a for a in dir(self.table_widget) if 'select' in a.lower() or 'cursor' in a.lower()]
