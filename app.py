@@ -446,23 +446,36 @@ class BotManagementScreen(Screen):
     
     def delete_selected(self) -> None:
         """Delete selected bot(s) from table."""
-        # Get selection from DataTable
-        try:
-            indices = self.table_widget.selection if self.table_widget else set()
-        except Exception:
-            indices = set()
-        
-        if not indices:
-            self.notify("Please select a bot to delete", severity="warning")
+        # Check if table widget exists before accessing selection
+        if not self.table_widget:
+            logger.error("[DELETE] Table widget not available")
+            self.notify("Table not ready, try again", severity="warning")
             return
-        
-        # Get the selected row index and find the corresponding bot
+
+        # Textual DataTable.selection is a set containing selected row indices
+        indices = getattr(self.table_widget, "selection", None)
+
+        if not isinstance(indices, set) or not indices:
+            self.notify("Please select a bot to delete (use arrow keys)", severity="warning")
+            return
+
+        # Get the list of bots matching table rows
         rows = list(self.bots.keys())
-        for idx in sorted(indices):
-            if idx < len(rows):
-                bot_id = rows[idx]
+        deleted_count = 0
+
+        logger.info(f"[DELETE] Deleting {len(indices)} selected bot(s) from row indices: {indices}")
+
+        # Process each selected index
+        for row_idx in sorted(indices):
+            if row_idx < len(rows):
+                bot_id = rows[row_idx]
                 self._delete_bot(bot_id)
-    
+                deleted_count += 1
+        
+        if deleted_count == 0:
+            self.notify("No bots found at selected indices", severity="warning")
+        else:
+            logger.info(f"[DELETE] Successfully queued {deleted_count} bot(s) for deletion")
     def _delete_bot(self, bot_id: str) -> None:
         """Delete a single bot."""
         try:
