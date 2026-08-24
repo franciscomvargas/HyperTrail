@@ -446,36 +446,66 @@ class BotManagementScreen(Screen):
     
     def delete_selected(self) -> None:
         """Delete selected bot(s) from table."""
-        # Check if table widget exists before accessing selection
-        if not self.table_widget:
-            logger.error("[DELETE] Table widget not available")
-            self.notify("Table not ready, try again", severity="warning")
+        # Check if table exists and has bots
+        if not self.table_widget or len(self.bots) == 0:
+            logger.error("[DELETE] Table widget unavailable or no bots")
+            self.notify("No bots to delete", severity="warning")
             return
 
-        # Textual DataTable.selection is a set containing selected row indices
-        indices = getattr(self.table_widget, "selection", None)
+        try:
+            # Try multiple approaches to get selection
+            logger.info(f"[DELETE] Checking selection - table has {len(self.table_widget).rows()} rows")
+            
+            # Get available attributes related to selection
+            sel_attrs = [a for a in dir(self.table_widget) if 'select' in a.lower() or 'cursor' in a.lower()]
+            logger.info(f"[DELETE] Relevant attrs: {sel_attrs}")
 
-        if not isinstance(indices, set) or not indices:
-            self.notify("Please select a bot to delete (use arrow keys)", severity="warning")
-            return
+            # Approach 1: Check selection (set-based, multi-select mode)
+            if hasattr(self.table_widget, 'selection'):
+                sel_value = self.table_widget.selection
+                logger.info(f"[DELETE] Selection value: {type(sel_value).__name__} = {sel_value}")
+                
+                if isinstance(sel_value, set) and len(sel_value):
+                    # Multi-select mode with actual selections
+                    for row_idx in sorted(sel_value):
+                        if 0 <= row_idx < len(self.bots):
+                            bot_id = list(self.bots.keys())[row_idx]
+                            self._delete_bot(bot_id)
+                            logger.info(f"[DELETE] ✓ Deleted {bot_id} from selected row {row_idx}")
+                    return
 
-        # Get the list of bots matching table rows
-        rows = list(self.bots.keys())
-        deleted_count = 0
+            # Approach 2: Check cursor position (arrow keys mode)
+            if hasattr(self.table_widget, 'cursor_row') and self.table_widget.cursor_row is not None:
+                cursor = self.table_widget.cursor_row
+                logger.info(f"[DELETE] Cursor at row {cursor}, total rows {len(self.bots)}")
+                
+                if 0 <= cursor < len(self.bots):
+                    bot_id = list(self.bots.keys())[cursor]
+                    self._delete_bot(bot_id)
+                    logger.info(f"[DELETE] ✓ Deleted {bot_id} from cursor row {cursor}")
+                    return
+            
+            # Approach 3: First selection (if exists)
+            if hasattr(self.table_widget, 'first_selected') and self.table_widget.first_selected is not None:
+                first = self.table_widget.first_selected
+                logger.info(f"[DELETE] First selected index: {first}")
+                
+                if isinstance(first, int) and 0 <= first < len(self.bots):
+                    bot_id = list(self.bots.keys())[first]
+                    self._delete_bot(bot_id)
+                    logger.info(f"[DISPLAY] ✓ Deleted {bot_id} from first_selected")
+                    return
 
-        logger.info(f"[DELETE] Deleting {len(indices)} selected bot(s) from row indices: {indices}")
+            # No valid selection found
+            logger.error("[DELETE] No valid row selected - please select with arrow keys or click")
+            self.notify("Select a bot row (arrow keys or click to highlight), then press D", severity="warning")
 
-        # Process each selected index
-        for row_idx in sorted(indices):
-            if row_idx < len(rows):
-                bot_id = rows[row_idx]
-                self._delete_bot(bot_id)
-                deleted_count += 1
-        
-        if deleted_count == 0:
-            self.notify("No bots found at selected indices", severity="warning")
-        else:
-            logger.info(f"[DELETE] Successfully queued {deleted_count} bot(s) for deletion")
+        except Exception as e:
+            logger.exception(f"[DELETE] Error checking selection: {e}")
+            import traceback
+            traceback.print_exc()
+            self.notify(f"Error: {str(e)}", severity="error")
+
     def _delete_bot(self, bot_id: str) -> None:
         """Delete a single bot."""
         try:
