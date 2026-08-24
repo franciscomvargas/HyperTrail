@@ -99,23 +99,46 @@ class DatabasePersistence:
             if conn:
                 conn.close()
     
-    async def persist_bot_config(self, config: Dict[str, Any]) -> bool:
-        """Save bot configuration to database."""
+    async def persist_bot_config(self, config: Dict[str, Any], reduce_only: Optional[bool] = None) -> bool:
+        """Save bot configuration to database.
+        
+        Args:
+            config: Bot configuration dictionary with id, coin, trail_type, etc.
+            reduce_only: If provided, use this for reduce_only. Otherwise derived from order_side or trail_type.
+        """
         try:
+            # Determine reduce_only value (1=buy, 0=sell)
+            if reduce_only is not None:
+                # Use the explicitly provided reduce_only value
+                reduce_only_value = 1 if reduce_only else 0
+            else:
+                # Derive from config fields
+                order_side = config.get('order_side', '').lower() if isinstance(config.get('order_side'), str) else ''
+                
+                # Map order_side to reduce_only (1=buy, 0=sell)
+                if order_side in ('buy', 'long_entry'):
+                    reduce_only_value = 1
+                elif order_side in ('sell', 'short_entry', 'long_exit', 'short_exit'):
+                    reduce_only_value = 0
+                else:
+                    # Fallback: check trail_type
+                    trailing_val = config.get('trail_type', '').lower() if isinstance(config.get('trail_type'), str) else ''
+                    reduce_only_value = 1 if trailing_val in ('long_entry', 'long_exit') else 0
+            
             with self._get_cursor() as cursor:
                 cursor.execute("""
                     INSERT OR REPLACE INTO bots 
                     (bot_id, coin, trail_type, size_usd, offset_pct, max_chase_pct, reduce_only, is_active)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
-                    config.get('bot_id', 'unknown'),
+                    config.get('bot_id', config.get('id', 'unknown')),
                     config.get('coin'),
                     config.get('trail_type', ''),
-                    config.get('size_usd', 0),
-                    config.get('offset_pct', 0),
-                    config.get('max_chase_pct', 0),
-                    1 if config.get('reduce_only') else 0,
-                    1 if config.get('is_active') else 0,
+                    float(config.get('size_usd', 0)),
+                    float(config.get('offset_pct', 0)),
+                    float(config.get('max_chase_pct', 1.5)),
+                    reduce_only_value,
+                    1 if config.get('is_active', True) else 0,
                 ))
             
             logger.info(f"Persisted bot config for {config.get('bot_id')}")
@@ -155,32 +178,29 @@ class DatabasePersistence:
             with self._get_cursor() as cursor:
                 cursor.execute("""
                     SELECT bot_id, coin, trail_type, size_usd, offset_pct, 
-                           max_chase_pct, reduce_only, is_active, created_at, oid,
-                           current_limit_price, last_trail_reference, delta_pct,
-                           times_active_minutes, fills_count, status
-                    FROM bots
+                           max_chase_pct, reduce_only, is_active, created_at
+                    FROM bots WHERE is_active = 1 OR is_active IS NULL
                 """)
                 
                 for row in cursor.fetchall():
                     bot_id = row[0]
+                    
+                    # Map reduce_only to order_side: reduce_only=1 means it's a buy order
+                    order_side = "buy" if row[6] == 1 else "sell"
+                    
                     result[bot_id] = {
                         "id": bot_id,
                         "coin": row[1],
                         "trail_type": row[2],
-                        "size_usd": row[3],
-                        "offset_pct": row[4],
-                        "max_chase_pct": row[5],
-                        "order_side": "buy" if row[6] else "sell",  # reduce_only=1 means buy
-                        "status": "ACTIVE" if row[7] else "INACTIVE",
-                        "created_at": row[8],
-                        "oid": row[9] if row[9] else None,
-                        "current_limit_price": row[10] if row[10] else None,
-                        "last_trail_reference": row[11] if row[11] else None,
-                        "delta_pct": row[12] if row[12] else None,
-                        "times_active_minutes": row[13] if row[13] else 0,
-                        "fills_count": row[14] if row[14] else 0,
+                        "size_usd": float(row[3]),
+                        "offset_pct": float(row[4]),
+                        "max_chase_pct": float(row[5]),
+                        "order_side": order_side,
+                        "status": "ACTIVE",
+                        "created_at": row[8] if row[8] else datetime.now().isoformat()
                     }
             
+            logger.info(f"Loaded {len(result)} bot(s) from database")
             return result
             
         except Exception as e:

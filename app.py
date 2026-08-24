@@ -203,7 +203,7 @@ class HelpModal(ModalScreen):
         )
         
         yield Static("[bold]Keyboard Controls:[/]")
-        yield Static("  [yellow][q][/]. Quit the application")
+        yield Static("  [yellow][q] [/]. Quit the application")
         yield Static("  [yellow][c] [/]. Create new bot (creates dialog)")
         yield Static("  [yellow][d] [/]. Delete selected bots")
         yield Static("  [yellow][m] [/]. Toggle monitoring mode")
@@ -213,7 +213,7 @@ class HelpModal(ModalScreen):
         for trail_type in TrailType:
             yield Static(f"  • {trail_type.value.replace('_', ' ').title()}")
         
-        yield Static("\n[bold]Bot Management:[/]\n  ")
+        yield Static("\n[bold]Bot Management:[/] \n  ")
         yield Static("  • Use arrow keys and Enter to select bots\n  ")
         yield Static("  • Select bot from queue table below\n  ")
         yield Static("  • Delete with D key when selected")
@@ -293,13 +293,16 @@ class BotManagementScreen(Screen):
         Binding("h", "show_help", "Help (h)", show=True),
     ]
     
-    def __init__(self):
+    def __init__(self, persistence=None):
         super().__init__()
-        self.bots = {}  # Store bot data {id: dict}
+        self.bots = {}  # Store bot data {id: dict}  
         self.table_widget = None
-
-    async def on_mount(self) -> None:
-        logger.info("Bot management screen mounted")
+        self._persistence = persistence
+        
+    @property
+    def persistence(self):
+        """Get persistence layer instance."""
+        return self._persistence or getattr(self.app, "persistence", None)
 
     def compose(self) -> ComposeResult:
         """Create the main layout."""
@@ -340,67 +343,259 @@ class BotManagementScreen(Screen):
         
         yield Footer()
 
-    async def on_mount(self) -> None:
-        """Set up the screen after mount - populate table."""
+    def on_mount(self) -> None:
+        """Set up the screen after mount - load persisted bots and populate table."""
         super().on_mount() if hasattr(super(), "on_mount") else None
         
-        
-        # Load demo bots directly now that table_widget exists from compose
-        await self._load_bots()
+        # Load bots from persistence layer now that table_widget exists from compose
+        asyncio.create_task(self._load_bots())
 
     async def _load_bots(self) -> None:
-        """Load bots from persistence (mock for demo)."""
+        """Load bots from database persistence layer."""
+        # Ensure we have a table_widget before proceeding
+        if self.table_widget is None:
+            logger.warning("Table widget not ready during load")
+            return
+        
+        logger.info(f"[LOAD] Starting bot load, current bots count: {len(self.bots)}")
+        
         self.table_widget.clear()
+        
+        # Load all persisted bot configurations from database
+        if self.persistence:
+            loaded_bots = await self.persistence.load_all_bots()
+            
+            logger.info(f"[LOAD] Loaded {len(loaded_bots)} bot(s) from database")
+            
+            if loaded_bots:
+                self.bots = self._convert_loaded_bots_to_internal_format(loaded_bots)
+                logger.info(f"[LOAD] Converted to internal format: {len(self.bots)} bots")
+                
+                # Refresh the table to display loaded bots
+                self.refresh_table()
+        
+        # Update the active bots counter
+        try:
+            if active_static := self.query_one("#_active_counter", Static):
+                active_static.update(str(len(self.bots)))
+                logger.info(f"[LOAD] Updated counter to {len(self.bots)}")
+        except Exception as e:
+            logger.error(f"[LOAD] Could not update counter: {e}")
+
+    def _convert_loaded_bots_to_internal_format(self, loaded_bots: dict) -> dict:
+        """Convert database bot records to internal dictionary format."""
+        converted = {}
+        
+        for bot_id, db_record in loaded_bots.items():
+            # Map database fields to internal format
+            internal_bot = {
+                "id": db_record.get("id") or db_record.get("bot_id"),
+                "coin": db_record.get("coin", ""),
+                "trail_type": self._map_order_side_to_value(db_record.get("order_side", "buy")),
+                "size_usd": float(db_record.get("size_usd", 0)),
+                "offset_pct": float(db_record.get("offset_pct", 0)),
+                "max_chase_pct": float(db_record.get("max_chase_pct", 1.5)),
+                "order_side": db_record.get("order_side", db_record.get("order_side", "buy")),
+                "status": db_record.get("status", "ACTIVE"),
+                "created_at": db_record.get("created_at"),
+            }
+            
+            converted[bot_id] = internal_bot
+        
+        return converted
+
+    def _map_order_side_to_value(self, side: str) -> str:
+        """Map order side to trail type based on buy/sell side."""
+        if side.lower() == "buy":
+            # Buying => long entry
+            return "long_entry"
+        elif side.lower() == "sell":
+            # Selling => short entry
+            return "short_entry"
+        return "long_entry"
 
     def action_quit_app(self) -> None:
         """Exit the application."""
         self.app.exit()
         
-
-    def action_open_create_bot(self) -> None:
+    def show_help(self) -> None:
+        """Open the help modal."""
+        if hasattr(self.app, 'push_screen'):
+            def handle_result(result=None):
+                self._on_help_closed(result)
+            
+            help_modal = HelpModal()
+            self.app.push_screen(help_modal, handle_result)
+    
+    def _on_help_closed(self, result=None):
+        """Callback when help modal is closed."""
+        logger.info("Help modal closed")
+        
+    def open_create_bot(self) -> None:
         """Open the create bot dialog."""
-        self.notify("Opening Create Bot dialog...", severity="info")
-        dialogue = CreateBotDialog()
-        self.app.push_screen(dialogue, callback=self._on_create_bot_created)
+        # Use the app's push_screen method (Screen doesn't have push_screen)
+        if hasattr(self.app, 'push_screen'):
+            # Callback that directly calls the async handler
+            def handle_result(config):
+                logger.info(f"[DIALOG] Result received: {config is not None}")
+                # Call async function - create_task wraps it automatically
+                asyncio.create_task(self._on_create_bot_created(config))
+            
+            dialogue = CreateBotDialog()
+            self.app.push_screen(dialogue, handle_result)
+    
+    def delete_selected(self) -> None:
+        """Delete selected bot(s) from table."""
+        # Get selection from DataTable
+        try:
+            indices = self.table_widget.selection if self.table_widget else set()
+        except Exception:
+            indices = set()
+        
+        if not indices:
+            self.notify("Please select a bot to delete", severity="warning")
+            return
+        
+        # Get the selected row index and find the corresponding bot
+        rows = list(self.bots.keys())
+        for idx in sorted(indices):
+            if idx < len(rows):
+                bot_id = rows[idx]
+                self._delete_bot(bot_id)
+    
+    def _delete_bot(self, bot_id: str) -> None:
+        """Delete a single bot."""
+        try:
+            # Delete from database
+            if self.persistence:
+                asyncio.run(self.persistence.delete_bot(bot_id))
+            
+            # Remove from memory
+            if bot_id in self.bots:
+                del self.bots[bot_id]
+                logger.info(f"[DELETE] Deleted bot {bot_id}")
+                
+                # Refresh table immediately
+                self.refresh_table()
+                
+                # Update counter
+                try:
+                    if active_static := self.query_one("#_active_counter", Static):
+                        active_static.update(str(len(self.bots)))
+                        logger.info(f"[DELETE] Updated counter to {len(self.bots)}")
+                except Exception as e:
+                    logger.warning(f"[DELETE] Could not update counter: {e}")
+            
+            self.notify(f"✓ Bot {bot_id} deleted", severity="success")
+        except Exception as e:
+            logger.error(f"[DELETE] Failed to delete bot {bot_id}: {e}")
+            self.notify(f"Failed to delete bot: {str(e)}", severity="error")
 
-    def _on_create_bot_created(self, new_config: dict | None) -> None:
+    async def _on_create_bot_created(self, new_config: dict) -> None:
         """Handle bot creation result."""
-        if new_config and isinstance(new_config, dict):
-            # Store in memory first
-            self.bots[new_config["id"]] = new_config
+        logger.info(f"[CREATE] Processing bot config: {new_config.get('coin', 'Unknown')}")
+        
+        if not isinstance(new_config, dict):
+            logger.error(f"[CREATE] Invalid config type: {type(new_config).__name__}")
+            self.notify("Invalid configuration format", severity="error")
+            return
             
-            # Save to database for persistence
-            import asyncio
-            try:
-                success = asyncio.run(self.persistence.persist_bot_config(new_config))
-                if success:
-                    print(f"[INFO] Saved bot {new_config['coin']} ({new_config['id']}) to database")
-            except Exception as e:
-                print(f"[ERROR] Failed to save bot: {e}")
+        try:
+            # Build complete bot configuration
+            full_config = {
+                "id": str(new_config.get("id", uuid.uuid4().hex[:8])),
+                "bot_id": str(new_config.get("id", "")),
+                "coin": str(str(new_config.get("coin", "BTC")).upper()),
+                "trail_type": self._map_trail_type(new_config.get("trail_type")),
+                "size_usd": float(new_config.get("size_usd", 100.0)),
+                "offset_pct": float(new_config.get("offset_pct", 0.8)),
+                "max_chase_pct": float(new_config.get("max_chase_pct", 1.5)),
+                "order_side": str(new_config.get("order_side", "buy")).lower(),
+                "status": "ACTIVE",
+                "is_active": True,
+            }
             
-            self.refresh_table()
-            self.notify(f"✓ Bot {new_config['coin']} created!", severity="success")
-        else:
-            self.notify("Failed to create bot", severity="error")
+            # Store in memory FIRST
+            bot_id = full_config["id"]
+            self.bots[bot_id] = full_config
+            logger.info(f"[CREATE] Added bot {full_config['coin']} to memory: {len(self.bots)} total bots")
+            
+            # Save to database for persistence (async)
+            if hasattr(self, 'persistence') and self.persistence:
+                try:
+                    # Map order_side to reduce_only (1=buy, 0=sell)
+                    order_side = full_config["order_side"]
+                    reduce_only = 1 if order_side == "buy" else 0
+                    
+                    save_success = await self.persistence.persist_bot_config(
+                        full_config, 
+                        reduce_only=reduce_only
+                    )
+                    
+                    if save_success:
+                        logger.info(f"[CREATE] Bot saved to database: {full_config['coin']}")
+                    else:
+                        logger.warning(f"[CREATE] Failed to save bot to database")
+                except Exception as e:
+                    logger.error(f"[CREATE] Database error: {e}")
+            
+            # CRITICAL: Update UI immediately after adding to memory
+            self._refresh_ui_after_create(full_config)
 
+        except Exception as e:
+            logger.exception(f"[CREATE] Error processing bot: {e}")
+            self.notify(f"Error creating bot: {str(e)}", severity="error")
+    
+    def _refresh_ui_after_create(self, new_bot: dict) -> None:
+        """Refresh UI after bot creation - called synchronously."""
+        logger.info(f"[UI] Refreshing table and counter for new bot")
+        
+        # Always refresh table (no guard clauses!)
+        if self.table_widget:
+            self.refresh_table()
+            logger.info(f"[UI] Table refreshed with {len(self.bots)} bots")
+            
+            # Update counter
+            try:
+                if active_static := self.query_one("#_active_counter", Static):
+                    active_static.update(str(len(self.bots)))
+                    logger.info(f"[UI] Counter updated to {len(self.bots)}")
+            except Exception as e:
+                logger.warning(f"[UI] Could not update counter: {e}")
+        else:
+            logger.error("[UI] Table widget is None - cannot refresh!")
+
+    def _map_trail_type(self, trail_type) -> str:
+        """Map trail type to proper value."""
+        if isinstance(trail_type, str):
+            return trail_type.lower()
+        elif hasattr(trail_type, 'value'):
+            return trail_type.value
+        return "long_entry"  # default fallback
 
 
     def refresh_table(self) -> None:
         """Update the table with current bots."""
+        if not self.table_widget:
+            logger.warning("[TABLE] Table widget is None")
+            return
+            
+        logger.info(f"[TABLE] Clearing and refreshing {len(self.bots)} bots")
         self.table_widget.clear()
         
         for bot_id, bot_data in sorted(self.bots.items()):
             row_data = (
-                bot_data.get("id", "")[:8],
-                bot_data.get("coin", ""),
-                bot_data.get("trail_type", "").replace('_', ' ').title(),
-                bot_data.get("order_side", "UNKNOWN").upper(),
+                str(bot_data.get("id", ""))[:8],
+                str(bot_data.get("coin", "")),
+                str(bot_data.get("trail_type", "")).replace('_', ' ').title(),
+                str(bot_data.get("order_side", "UNKNOWN")).upper(),
                 f"${bot_data.get('size_usd', 0):.2f}",
                 f"{bot_data.get('offset_pct', 0)}%",
                 "ACTIVE" if bot_data.get("status") == "ACTIVE" else "INACTIVE",
             )
             self.table_widget.add_row(*row_data)
-
+        
+        logger.info(f"[TABLE] Added {len(self.bots)} rows to table")
 
 
 class HyperTrailApp(App):
@@ -428,19 +623,22 @@ class HyperTrailApp(App):
         
         # Initialize persistence layer
         db_path = Path("logs") / "hypertrail_bots.db"
+        if not db_path.parent.exists():
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            
         self.persistence = DatabasePersistence(str(db_path))
 
     async def on_mount(self) -> None:
         """Set up the main screen."""
-        logger.info("HyperTrail TUI starting...")
+        logger.info("[APP] HyperTrail TUI starting...")
         
-        # Push the bot management screen (pass callback for modal results)
-        main_screen = BotManagementScreen()
+        # Push the bot management screen with persistence layer
+        main_screen = BotManagementScreen(persistence=self.persistence)
         self.push_screen(main_screen, callback=self._on_main_screen_ready)
 
     def _on_main_screen_ready(self, result=None):
         """Callback after main screen is loaded."""
-        logger.info("Main bot management screen ready")
+        logger.info("[APP] Main bot management screen ready")
     
     def action_quit_app(self) -> None:
         """Exit the application."""
