@@ -535,6 +535,70 @@ class BotManagementScreen(Screen):
         
         self.notify(f"✓ Bot {bot_id} deleted", severity="success")
 
+    def action_delete_selected(self) -> None:
+        """Delete bot at the currently selected/highlighted cell in the DataTable."""
+        
+        # Check if we have any bots to delete
+        if not self.bots or len(self.bots) == 0:
+            logger.info("[DELETE] No bots available for deletion")
+            self.notify("No bots to delete", severity="warning")
+            return
+        
+        if not self.table_widget:
+            logger.error("[DELETE] Table widget is None")
+            self.notify("Table not ready", severity="error")
+            return
+        
+        # TEXTUAL DATATABLE CURSOR SELECTION LOGIC
+        # The .cursor_row property contains the row index of the currently selected/highlighted cell.
+        # This updates when you use arrow keys OR click on a cell in the table.
+        
+        cursor_row = self.table_widget.cursor_row
+        
+        logger.info(f"[DELETE] DataTable cursor at: cursor_row={cursor_row}, has {len(self.bots)} bots")
+        
+        # Validate the cursor position
+        if cursor_row is None or not isinstance(cursor_row, int):
+            logger.warning("[DELETE] Cursor row is invalid (not an integer)")
+            self.notify("Cursor position invalid, select a row", severity="warning")
+            return
+        
+        if cursor_row < 0:
+            logger.warning(f"[DELETE] Cursor row out of range ({cursor_row} for {len(self.bots)} bots)")
+            self.notify("Invalid selection - click a row first", severity="warning")
+            return
+        
+        if cursor_row >= len(self.bots):
+            logger.error(f"[DELETE] Cursor row {cursor_row} exceeds bot count {len(self.bots)}")
+            self.notify("Selection out of bounds", severity="error")
+            return
+        
+        # SUCCESS: Get the bot ID at this row position
+        bot_id = list(self.bots.keys())[cursor_row]
+        logger.info(f"[DELETE] Deleting bot '{bot_id}' from table row {cursor_row}")
+        
+        # Remove immediately from memory (instant UI feedback)
+        del self.bots[bot_id]
+        
+        # Refresh the table to show updated list
+        self.refresh_table()
+        
+        # Update the counter
+        try:
+            active_static = self.query_one("#_active_counter", Static)
+            active_static.update(str(len(self.bots)))
+            logger.info(f"[DELETE] Counter updated: now showing {len(self.bots)} bots")
+        except Exception as e:
+            logger.warning(f"[DELETE] Failed to update counter: {e}")
+        
+        # Schedule database deletion (async, non-blocking)
+        if self.persistence:
+            import asyncio
+            asyncio.create_task(self.persistence.delete_bot(bot_id))
+        
+        # Show success message
+        self.notify(f"✓ Bot '{bot_id}' deleted", severity="success")
+
 class HyperTrailApp(App):
     """Main application entry point for TUI."""
     
