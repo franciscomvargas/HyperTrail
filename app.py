@@ -445,6 +445,64 @@ class BotManagementScreen(Screen):
             dialogue = CreateBotDialog()
             self.app.push_screen(dialogue, handle_result)
     
+    async def _on_create_bot_created(self, new_config: dict) -> None:
+        """Handle bot creation result asynchronously."""
+        logger.info(f"[CREATE] Processing bot creation for: {new_config.get('coin', 'Unknown')}")
+        
+        if not isinstance(new_config, dict):
+            logger.error(f"[CREATE] Invalid config format: {type(new_config).__name__}")
+            self.notify("Invalid configuration", severity="error")
+            return
+        
+        try:
+            # Build complete bot config
+            full_config = {
+                "id": str(new_config.get("id", "unknown")),
+                "bot_id": str(new_config.get("id", "")),
+                "coin": str(str(new_config.get("coin", "BTC")).upper()),
+                "trail_type": self._map_trail_type(new_config.get("trail_type")),
+                "size_usd": float(new_config.get("size_usd", 100.0)),
+                "offset_pct": float(new_config.get("offset_pct", 0.8)),
+                "max_chase_pct": float(new_config.get("max_chase_pct", 1.5)),
+                "order_side": str(new_config.get("order_side", "buy")).lower(),
+                "status": "ACTIVE",
+            }
+            
+            # Add to memory
+            bot_id = full_config["id"]
+            self.bots[bot_id] = full_config
+            logger.info(f"[CREATE] Added bot {full_config['coin']} to memory: {len(self.bots)} total")
+            
+            # Save to database asynchronously
+            if hasattr(self, 'persistence') and self.persistence:
+                reduce_only = 1 if full_config["order_side"] == "buy" else 0
+                success = await self.persistence.persist_bot_config(full_config, reduce_only=reduce_only)
+                
+                if success:
+                    logger.info(f"[CREATE] Bot saved to database")
+                else:
+                    logger.warning("[CREATE] Failed to save bot to database")
+            
+            # Update UI immediately with new bot in table
+            self.refresh_table()
+            
+            # Update counter
+            try:
+                if active_static := self.query_one("#_active_counter", Static):
+                    active_static.update(str(len(self.bots)))
+            except Exception as e:
+                logger.warning(f"[CREATE] Could not update counter: {e}")
+            
+            self.notify(f"✓ Bot {full_config['coin']} created!", severity="success")
+            
+        except Exception as e:
+            logger.exception(f"[CREATE] Error creating bot: {e}")
+            import traceback
+            traceback.print_exc()
+            self.notify(f"Error creating bot: {str(e)}", severity="error")
+
+
+    def _map_trail_type(self, trail_type) -> str:
         """Map trail type to proper value."""
         if isinstance(trail_type, str):
             return trail_type.lower()
